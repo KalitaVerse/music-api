@@ -9,11 +9,27 @@ const app = express();
 // These are Vercel-hosted JioSaavn API clones: no Cloudflare, no cold starts.
 // Tried in order; first one that returns a non-empty results array wins.
 const UPSTREAMS = [
-  "https://jiosaavn-api-privatecvc2.vercel.app/api/search/songs",
-  "https://jiosaavn-api2.vercel.app/api/search/songs",
-  "https://saavn.me/api/search/songs",
-  "https://saavn.dev/api/search/songs",   // last: blocked on Render IPs, kept as last-resort
+  "https://jiosaavn-n0ivatwvc-kalitaverses-projects.vercel.app/api/search/songs", // YOUR own instance — primary
+  "https://saavn.me/api/search/songs",                                             // mirror fallback
+  "https://saavn.dev/api/search/songs",                                            // last resort (Cloudflare-blocked on Render)
 ];
+
+// ── Cache ─────────────────────────────────────────────────────────────
+const CACHE     = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function cacheGet(q) {
+  const entry = CACHE.get(q);
+  if (!entry) return null;
+  if (Date.now() > entry.expiry) { CACHE.delete(q); return null; }
+  return entry.data;
+}
+
+function cacheSet(q, data) {
+  CACHE.set(q, { data, expiry: Date.now() + CACHE_TTL });
+  // Prevent unbounded growth — evict oldest entry if over 200
+  if (CACHE.size > 200) CACHE.delete(CACHE.keys().next().value);
+}
 
 // ── Health ────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
@@ -61,6 +77,13 @@ const PER_MIRROR_MAX_MS  =  8_000; // cap per mirror so one slow host can't eat 
 app.get("/search", async (req, res) => {
   const q = (req.query.q ?? "").toString().trim();
   if (!q) return res.status(400).json({ error: "Missing query parameter 'q'" });
+
+  // ── Cache hit ────────────────────────────────────────────────────
+  const cached = cacheGet(q);
+  if (cached) {
+    console.log(`[search] cache hit for "${q}" (${cached.length} results)`);
+    return res.json({ data: cached, cached: true });
+  }
 
   const deadline = Date.now() + GLOBAL_DEADLINE_MS;
 
@@ -110,6 +133,7 @@ app.get("/search", async (req, res) => {
       }
 
       console.log(`[search] ${base} → ${results.length} results for "${q}" ✓`);
+      cacheSet(q, results);
       return res.json({ data: results });
 
     } catch (err) {
