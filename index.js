@@ -1,162 +1,190 @@
 "use strict";
 const express = require("express");
-const axios = require("axios");
+const axios   = require("axios");
 
 const app = express();
 
-// ── Upstream mirrors ──────────────────────────────────────────────────
-// saavn.dev is Cloudflare-JS-challenged on Render IPs — blocked permanently.
-// These are Vercel-hosted JioSaavn API clones: no Cloudflare, no cold starts.
-// Tried in order; first one that returns a non-empty results array wins.
-const UPSTREAMS = [
-  "https://jiosaavn-n0ivatwvc-kalitaverses-projects.vercel.app/api/search/songs", // YOUR own instance — primary
-  "https://saavn.me/api/search/songs",                                             // mirror fallback
-  "https://saavn.dev/api/search/songs",                                            // last resort (Cloudflare-blocked on Render)
+// ── Mirror registry ───────────────────────────────────────────────────
+// All fire in PARALLEL via Promise.any() — fastest success wins.
+// Each mirror has its own url builder + response normaliser
+// so shape differences are handled per-source.
+const MIRRORS = [
+  {
+    name: "kalita-own",          // YOUR OWN Vercel instance — most reliable
+    url: (q) => `https://jiosaavn-n0ivatwvc-kalitaverses-projects.vercel.app/api/search/songs?query=${encodeURIComponent(q)}`,
+    parse: (raw) => raw?.data?.results ?? null,
+  },
+  {
+    name: "rajput-hemant",       // jiosaavn-api (TypeScript) by rajput-hemant
+    url: (q) => `https://jiosaavn-api-ts.vercel.app/api/search/songs?query=${encodeURIComponent(q)}`,
+    parse: (raw) => raw?.data?.results ?? null,
+  },
+  {
+    name: "strtux",              // JioSaavn Unofficial API by StrTux (different shape)
+    url: (q) => `https://strtux-main.vercel.app/search/songs?q=${encodeURIComponent(q)}`,
+    parse: (raw) => {
+      // shape: { status, data: { songs: [...] } }
+      // normalise to match sumitkolhe shape so Flutter sees consistent objects
+      const songs = raw?.data?.songs ?? null;
+      if (!Array.isArray(songs)) return null;
+      return songs.map(s => ({
+        id:          s.id,
+        name:        s.name,
+        artists:     { primary: [{ name: s.primaryArtists ?? "Unknown" }] },
+        image:       [
+                       { quality: "50x50",   url: s.image },
+                       { quality: "150x150", url: s.image },
+                       { quality: "500x500", url: s.image },
+                     ],
+        downloadUrl: s.downloadUrl
+                       ? [{ quality: "320kbps", url: s.downloadUrl }]
+                       : [],
+        duration:    s.duration,
+        year:        s.year,
+      }));
+    },
+  },
+  {
+    name: "jiosaavn-api5",       // another sumitkolhe-based public instance
+    url: (q) => `https://jiosaavn-api5.vercel.app/api/search/songs?query=${encodeURIComponent(q)}`,
+    parse: (raw) => raw?.data?.results ?? null,
+  },
+  {
+    name: "saavn-dev",           // last resort — Cloudflare-blocked on Render IPs
+    url: (q) => `https://saavn.dev/api/search/songs?query=${encodeURIComponent(q)}`,
+    parse: (raw) => raw?.data?.results ?? null,
+  },
 ];
 
-// ── Cache ─────────────────────────────────────────────────────────────
-const CACHE     = new Map();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const GLOBAL_TIMEOUT_MS =  7_000;   // wall-clock cap for the whole race (mirrors respond in <2s warm)
+const CACHE             = new Map();
+const CACHE_TTL         = 5 * 60 * 1000; // 5 minutes
 
+// ── Cache helpers ─────────────────────────────────────────────────────
 function cacheGet(q) {
   const entry = CACHE.get(q);
   if (!entry) return null;
   if (Date.now() > entry.expiry) { CACHE.delete(q); return null; }
   return entry.data;
 }
-
 function cacheSet(q, data) {
   CACHE.set(q, { data, expiry: Date.now() + CACHE_TTL });
-  // Prevent unbounded growth — evict oldest entry if over 200
   if (CACHE.size > 200) CACHE.delete(CACHE.keys().next().value);
+}
+
+// saavn.dev stays in MIRRORS for /debug only — excluded from the live race
+const ACTIVE_MIRRORS = MIRRORS.slice(0, 4);
+
+// ── Per-mirror fetch ──────────────────────────────────────────────────
+async function fetchMirror(mirror, q) {
+  const r = await axios.get(mirror.url(q), {
+    timeout: GLOBAL_TIMEOUT_MS,
+    headers: _headers(),
+  });
+
+  const raw = r.data;
+
+  // Reject Cloudflare HTML challenges
+  if (typeof raw === "string" && raw.trimStart().startsWith("<")) {
+    throw new Error("HTML block (Cloudflare)");
+  }
+
+  const results = mirror.parse(raw);
+
+  if (!Array.isArray(results)) {
+    throw new Error(`Invalid shape: ${JSON.stringify(raw).slice(0, 80)}`);
+  }
+  // Allow empty arrays — a genuine "no results" query should not fail the race
+
+  console.log(`[race] ✓ ${mirror.name} → ${results.length} results`);
+  return results;
 }
 
 // ── Health ────────────────────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "Music API running" });
+  res.json({ status: "ok", message: "Music API running", mirrors: MIRRORS.map(m => m.name) });
 });
 
-// ── Debug ─────────────────────────────────────────────────────────────
+// ── Debug: test ALL mirrors and report ───────────────────────────────
 app.get("/debug", async (req, res) => {
   const q = (req.query.q ?? "shape of you").toString().trim();
-  const results = [];
 
-  for (const base of UPSTREAMS) {
-    try {
-      const r = await axios.get(base, {
-        params: { query: q },
-        timeout: 10_000,
-        headers: _headers(),
-      });
-      const raw = r.data;
-      const isHtml = typeof raw === "string" && raw.trimStart().startsWith("<");
-      results.push({
-        url: base,
-        status: r.status,
-        isHtml,
-        dataType: typeof raw?.data,
-        resultsLength: raw?.data?.results?.length ?? (Array.isArray(raw?.data) ? raw.data.length : "N/A"),
-        topKeys: isHtml ? ["(HTML — Cloudflare block)"] : Object.keys(raw ?? {}),
-      });
-    } catch (err) {
-      results.push({
-        url: base,
-        error: err.message,
-        httpStatus: err.response?.status,
-      });
-    }
-  }
+  const checks = await Promise.allSettled(
+    MIRRORS.map(async (m) => {
+      const start = Date.now();
+      try {
+        const results = await fetchMirror(m, q);
+        return { name: m.name, ok: true, count: results.length, ms: Date.now() - start };
+      } catch (err) {
+        return { name: m.name, ok: false, error: err.message, ms: Date.now() - start };
+      }
+    })
+  );
 
-  res.json(results);
+  res.json(checks.map(c => c.value ?? c.reason));
 });
 
-// ── Search ────────────────────────────────────────────────────────────
-const GLOBAL_DEADLINE_MS = 15_000; // total wall-clock budget across all mirrors
-const PER_MIRROR_MAX_MS  =  8_000; // cap per mirror so one slow host can't eat the budget
-
+// ── Search: race all mirrors, first success wins ──────────────────────
 app.get("/search", async (req, res) => {
   const q = (req.query.q ?? "").toString().trim();
   if (!q) return res.status(400).json({ error: "Missing query parameter 'q'" });
 
-  // ── Cache hit ────────────────────────────────────────────────────
+  // Cache hit
   const cached = cacheGet(q);
   if (cached) {
-    console.log(`[search] cache hit for "${q}" (${cached.length} results)`);
+    console.log(`[search] cache hit "${q}" (${cached.length} results)`);
     return res.json({ data: cached, cached: true });
   }
 
-  const deadline = Date.now() + GLOBAL_DEADLINE_MS;
-
-  for (const base of UPSTREAMS) {
-    // How many ms remain in the global budget?
-    const remaining = deadline - Date.now();
-    if (remaining <= 500) {
-      console.warn("[search] Global deadline reached, aborting mirror chain");
-      break;
-    }
-
-    // Per-mirror timeout = whatever is smaller: remaining budget or the per-mirror cap
-    const mirrorTimeout = Math.min(remaining, PER_MIRROR_MAX_MS);
-
-    try {
-      const r = await axios.get(base, {
-        params: { query: q },
-        timeout: mirrorTimeout,
-        headers: _headers(),
-      });
-
-      const raw = r.data;
-
-      // Reject HTML bot-challenge pages (Cloudflare)
-      if (typeof raw === "string" && raw.trimStart().startsWith("<")) {
-        console.warn(`[search] ${base} → HTML block (Cloudflare), trying next`);
-        continue;
-      }
-
-      // Normalise every known shape
-      const results =
-        raw?.data?.results ??
-        raw?.data?.data?.results ??
-        (Array.isArray(raw?.data) ? raw.data : null) ??
-        raw?.results ??
-        raw?.songs ??
-        null;
-
-      if (!Array.isArray(results)) {
-        console.warn(`[search] ${base} → unrecognised shape:`, JSON.stringify(raw).slice(0, 200));
-        continue;
-      }
-
-      if (results.length === 0) {
-        console.warn(`[search] ${base} → empty results, trying next`);
-        continue;
-      }
-
-      console.log(`[search] ${base} → ${results.length} results for "${q}" ✓`);
-      cacheSet(q, results);
-      return res.json({ data: results });
-
-    } catch (err) {
-      console.warn(`[search] ${base} → error: ${err.message}`);
-    }
-  }
-
-  console.error(`[search] All upstreams failed for "${q}"`);
-  return res.status(502).json({
-    error: "All search sources failed. Try again in a moment.",
+  // Race all mirrors — Promise.any() resolves with the FIRST mirror that succeeds
+  // Timer ref is stored so we can clear it immediately when the race finishes,
+  // preventing the 7s setTimeout from leaking in the Node.js event loop.
+  let timeoutHandle;
+  const globalTimeout = new Promise((_, reject) => {
+    timeoutHandle = setTimeout(() => reject(new Error("Global timeout")), GLOBAL_TIMEOUT_MS);
   });
+
+  try {
+    const results = await Promise.any([
+      ...ACTIVE_MIRRORS.map(m => fetchMirror(m, q)),
+      globalTimeout,
+    ]);
+    clearTimeout(timeoutHandle); // ← cancel the timer the moment a mirror wins
+
+    // Deduplicate across mirrors (same song can appear from multiple sources)
+    const seen   = new Set();
+    const unique = [];
+    for (const s of results) {
+      const artist = s.artists?.primary?.[0]?.name ?? "";
+      const key = `${s.name}-${artist}`.toLowerCase();
+      if (!seen.has(key)) { seen.add(key); unique.push(s); }
+    }
+    const final = unique.slice(0, 20);
+
+    cacheSet(q, final);
+    return res.json({ data: final });
+
+  } catch (err) {
+    clearTimeout(timeoutHandle); // clean up in failure path too
+    if (err instanceof AggregateError) {
+      // Promise.any rejected — log each mirror's individual reason
+      console.error(`[search] All mirrors failed for "${q}". Reasons:`,
+        err.errors.map(e => e.message));
+    } else {
+      console.error(`[search] Unexpected error for "${q}":`, err.message);
+    }
+    return res.status(502).json({ error: "All search sources failed. Try again in a moment." });
+  }
 });
 
 // ── Headers ───────────────────────────────────────────────────────────
 function _headers() {
   return {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
+    "User-Agent":    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept":        "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.jiosaavn.com/",
-    "Origin": "https://www.jiosaavn.com",
+    "Referer":       "https://www.jiosaavn.com/",
+    "Origin":        "https://www.jiosaavn.com",
   };
 }
 
