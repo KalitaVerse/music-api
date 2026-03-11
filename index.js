@@ -1,6 +1,11 @@
 "use strict";
 const express = require("express");
 const axios = require("axios");
+const https = require("https");
+
+// Reuse TCP connections to saavn.dev — reduces handshake overhead
+// and significantly cuts "socket hang up" errors
+const agent = new https.Agent({ keepAlive: true });
 
 const app = express();
 
@@ -28,8 +33,9 @@ app.get("/search", async (req, res) => {
         {
           params: { query: q },
           timeout: 15_000,
+          httpsAgent: agent,
           headers: {
-            // Mimic a browser — helps avoid bot-blocking
+            // Mimic a browser — helps avoid bot-blocking on saavn.dev
             "User-Agent": "Mozilla/5.0 (compatible; MusicProxy/1.0)",
             "Accept": "application/json",
           },
@@ -45,8 +51,10 @@ app.get("/search", async (req, res) => {
         [];
 
       if (!Array.isArray(results)) {
-        console.error(`[search] Unexpected shape (attempt ${attempt}):`,
-          JSON.stringify(upstream.data).slice(0, 200));
+        console.error(
+          `[search] Unexpected shape (attempt ${attempt}):`,
+          JSON.stringify(upstream.data).slice(0, 200)
+        );
         lastError = new Error("Unexpected upstream response shape");
         continue; // retry
       }
@@ -55,6 +63,7 @@ app.get("/search", async (req, res) => {
 
     } catch (err) {
       lastError = err;
+
       const isRetryable =
         err.code === "ECONNRESET" ||
         err.code === "ECONNABORTED" ||
@@ -66,7 +75,7 @@ app.get("/search", async (req, res) => {
 
       if (!isRetryable || attempt === MAX_RETRIES) break;
 
-      // Exponential back-off: 500ms, 1000ms
+      // Exponential back-off: 500ms → 1000ms
       await new Promise((r) => setTimeout(r, attempt * 500));
     }
   }
