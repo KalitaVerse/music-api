@@ -1,7 +1,7 @@
 {
   "name": "music-api",
   "version": "1.0.0",
-  "description": "Music search proxy API",
+  "description": "Music search proxy for niggesh_music",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

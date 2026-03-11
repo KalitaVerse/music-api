@@ -1,37 +1,61 @@
+"use strict";
 const express = require("express");
 const axios = require("axios");
 
 const app = express();
 
+// ── Health / wake-up ─────────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.send("Music API running");
+  res.json({ status: "ok", message: "Music API running" });
 });
 
+// ── Search ───────────────────────────────────────────────────────────
+// Flutter client calls: GET /search?q=<query>
 app.get("/search", async (req, res) => {
-  const query = req.query.q;
+  const q = (req.query.q ?? "").toString().trim();
 
-  if (!query) {
-    return res.status(400).json({ error: "Missing query" });
+  if (!q) {
+    return res.status(400).json({ error: "Missing query parameter 'q'" });
   }
 
   try {
-    const url = `https://saavn.dev/api/search/songs?query=${encodeURIComponent(query)}`;
+    const upstream = await axios.get(
+      "https://saavn.dev/api/search/songs",
+      {
+        params: { query: q },
+        timeout: 12_000,
+      }
+    );
 
-    const response = await axios.get(url);
+    // saavn.dev returns: { status, data: { total, start, results: [...] } }
+    // Normalise to: { data: [...songs] } so the client has a stable contract
+    const results =
+      upstream.data?.data?.results ??
+      upstream.data?.data ??
+      upstream.data?.results ??
+      [];
 
-    res.json(response.data);
+    if (!Array.isArray(results)) {
+      console.error("[search] Unexpected upstream shape:", JSON.stringify(upstream.data).slice(0, 200));
+      return res.status(502).json({ error: "Upstream returned unexpected shape", data: [] });
+    }
+
+    return res.json({ data: results });
+
   } catch (err) {
-    console.error("Search error:", err.response?.data || err.message);
+    // Distinguish timeout vs other errors for better client messages
+    const isTimeout = err.code === "ECONNABORTED" || err.message?.includes("timeout");
 
-    res.status(500).json({
-      error: "Search failed",
-      details: err.response?.data || err.message
+    console.error("[search] Error:", isTimeout ? "timeout" : err.message);
+    return res.status(isTimeout ? 504 : 502).json({
+      error: isTimeout ? "Upstream timed out" : "Search failed",
+      details: err.message,
     });
   }
 });
 
+// ── Start ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
   console.log(`Music API running on port ${PORT}`);
 });
