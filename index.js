@@ -3,6 +3,10 @@ const axios = require("axios");
 
 const app = express();
 
+app.get("/", (req, res) => {
+  res.send("Music API running");
+});
+
 app.get("/search", async (req, res) => {
   const query = req.query.q;
 
@@ -18,6 +22,7 @@ app.get("/search", async (req, res) => {
     res.json(response.data);
   } catch (err) {
     console.error("Search error:", err.message);
+
     res.status(500).json({
       error: "Search failed",
       details: err.message
@@ -28,5 +33,5 @@ app.get("/search", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log("Music API running on port", PORT);
+  console.log(`Music API running on port ${PORT}`);
 });
