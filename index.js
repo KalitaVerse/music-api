@@ -1,30 +1,32 @@
 const express = require("express");
-const fetch = require("node-fetch");
+const axios = require("axios");
 
 const app = express();
-
-const PORT = process.env.PORT || 3000;
 
 app.get("/search", async (req, res) => {
   const query = req.query.q;
 
   if (!query) {
-    return res.json({ error: "Missing query" });
+    return res.status(400).json({ error: "Missing query" });
   }
 
   try {
-    const response = await fetch(
-      "https://saavn.dev/api/search/songs?query=" + encodeURIComponent(query)
-    );
+    const url = `https://saavn.dev/api/search/songs?query=${encodeURIComponent(query)}`;
 
-    const data = await response.json();
+    const response = await axios.get(url);
 
-    res.json(data);
+    res.json(response.data);
   } catch (err) {
-    res.status(500).json({ error: "Search failed" });
+    console.error("Search error:", err.message);
+    res.status(500).json({
+      error: "Search failed",
+      details: err.message
+    });
   }
 });
 
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log("Music API running on port " + PORT);
+  console.log("Music API running on port", PORT);
 });
