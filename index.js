@@ -9,10 +9,10 @@ const app = express();
 // These are Vercel-hosted JioSaavn API clones: no Cloudflare, no cold starts.
 // Tried in order; first one that returns a non-empty results array wins.
 const UPSTREAMS = [
-  "https://saavn.dev/api/search/songs",
   "https://jiosaavn-api-privatecvc2.vercel.app/api/search/songs",
   "https://jiosaavn-api2.vercel.app/api/search/songs",
   "https://saavn.me/api/search/songs",
+  "https://saavn.dev/api/search/songs",   // last: blocked on Render IPs, kept as last-resort
 ];
 
 // ── Health ────────────────────────────────────────────────────────────
@@ -55,15 +55,30 @@ app.get("/debug", async (req, res) => {
 });
 
 // ── Search ────────────────────────────────────────────────────────────
+const GLOBAL_DEADLINE_MS = 15_000; // total wall-clock budget across all mirrors
+const PER_MIRROR_MAX_MS  =  8_000; // cap per mirror so one slow host can't eat the budget
+
 app.get("/search", async (req, res) => {
   const q = (req.query.q ?? "").toString().trim();
   if (!q) return res.status(400).json({ error: "Missing query parameter 'q'" });
 
+  const deadline = Date.now() + GLOBAL_DEADLINE_MS;
+
   for (const base of UPSTREAMS) {
+    // How many ms remain in the global budget?
+    const remaining = deadline - Date.now();
+    if (remaining <= 500) {
+      console.warn("[search] Global deadline reached, aborting mirror chain");
+      break;
+    }
+
+    // Per-mirror timeout = whatever is smaller: remaining budget or the per-mirror cap
+    const mirrorTimeout = Math.min(remaining, PER_MIRROR_MAX_MS);
+
     try {
       const r = await axios.get(base, {
         params: { query: q },
-        timeout: 12_000,
+        timeout: mirrorTimeout,
         headers: _headers(),
       });
 
