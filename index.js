@@ -21,11 +21,11 @@ app.get("/search", async (req, res) => {
 
     res.json(response.data);
   } catch (err) {
-    console.error("Search error:", err.message);
+    console.error("Search error:", err.response?.data || err.message);
 
     res.status(500).json({
       error: "Search failed",
-      details: err.message
+      details: err.response?.data || err.message
     });
   }
 });
@@ -35,12 +35,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Music API running on port ${PORT}`);
 });
-
-catch (err) {
-  console.error(err.response?.data || err.message);
-
-  res.status(500).json({
-    error: "Search failed",
-    details: err.response?.data || err.message
-  });
-}
