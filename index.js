@@ -35,3 +35,12 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Music API running on port ${PORT}`);
 });
+
+catch (err) {
+  console.error(err.response?.data || err.message);
+
+  res.status(500).json({
+    error: "Search failed",
+    details: err.response?.data || err.message
+  });
+}
