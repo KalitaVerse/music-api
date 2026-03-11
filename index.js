@@ -20,7 +20,7 @@ app.get("/search", async (req, res) => {
 
   try {
     const upstream = await axios.get(
-      "https://saavn.dev/api/search/songs",
+      "https://jiosaavn-api-sigma-sandy.vercel.app/api/search/songs",
       {
         params: { query: q },
         timeout: 12_000,
