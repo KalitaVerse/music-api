@@ -56,7 +56,7 @@ const MIRRORS = [
   },
 ];
 
-const GLOBAL_TIMEOUT_MS =  7_000;   // wall-clock cap for the whole race (mirrors respond in <2s warm)
+const GLOBAL_TIMEOUT_MS = 12_000;   // wall-clock cap — covers cold-start mirrors (up to ~8s warm-up)
 const CACHE             = new Map();
 const CACHE_TTL         = 5 * 60 * 1000; // 5 minutes
 
@@ -69,7 +69,8 @@ function cacheGet(q) {
 }
 function cacheSet(q, data) {
   CACHE.set(q, { data, expiry: Date.now() + CACHE_TTL });
-  if (CACHE.size > 200) CACHE.delete(CACHE.keys().next().value);
+  // Evict oldest entries until we're within the size limit
+  while (CACHE.size > 200) CACHE.delete(CACHE.keys().next().value);
 }
 
 // saavn.dev stays in MIRRORS for /debug only — excluded from the live race
@@ -136,20 +137,21 @@ app.get("/search", async (req, res) => {
     return res.json({ data: cached, cached: true });
   }
 
-  // Race all mirrors — Promise.any() resolves with the FIRST mirror that succeeds
-  // Timer ref is stored so we can clear it immediately when the race finishes,
-  // preventing the 7s setTimeout from leaking in the Node.js event loop.
+  // Race all active mirrors — Promise.any resolves with the first success.
+  // The global timeout races the WHOLE Promise.any so it can actually cancel
+  // a hung race. Putting a reject-only promise inside Promise.any() does
+  // nothing — Promise.any ignores rejections until ALL promises reject.
   let timeoutHandle;
   const globalTimeout = new Promise((_, reject) => {
     timeoutHandle = setTimeout(() => reject(new Error("Global timeout")), GLOBAL_TIMEOUT_MS);
   });
 
   try {
-    const results = await Promise.any([
-      ...ACTIVE_MIRRORS.map(m => fetchMirror(m, q)),
+    const results = await Promise.race([
+      Promise.any(ACTIVE_MIRRORS.map(m => fetchMirror(m, q))),
       globalTimeout,
     ]);
-    clearTimeout(timeoutHandle); // ← cancel the timer the moment a mirror wins
+    clearTimeout(timeoutHandle);
 
     // Deduplicate across mirrors (same song can appear from multiple sources)
     const seen   = new Set();
