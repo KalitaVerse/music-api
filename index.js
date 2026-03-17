@@ -111,6 +111,8 @@ app.get("/search", async (req, res) => {
       const key = `${s.name}-${artist}`.toLowerCase();
       if (!seen.has(key)) { seen.add(key); unique.push(s); }
     }
+    const final = unique.slice(0, 50); 
+    CACHE.set(q, final);
     return res.json({ data: unique.slice(0, 50) });
   } catch (err) {
     return res.status(502).json({ error: "Search failed. Try again." });
