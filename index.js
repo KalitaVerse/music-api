@@ -5,6 +5,8 @@ import { WebSocketServer, WebSocket } from "ws";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const CACHE = new Map();
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. MIRROR REGISTRY (Saavn + iTunes + Deezer)
 // ─────────────────────────────────────────────────────────────────────────────
