@@ -17,11 +17,6 @@ const MIRRORS = [
     parse: (raw) => raw?.data?.results ?? null,
   },
   {
-    name: "saavn-me",
-    url: (q) => `https://saavn.me/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-    parse: (raw) => raw?.data?.results ?? null,
-  },
-  {
     name: "saavn-dev",
     url: (q) => `https://saavn.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
