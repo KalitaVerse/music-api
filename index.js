@@ -27,6 +27,11 @@ const MIRRORS = [
     parse: (raw) => raw?.data?.results ?? null,
   },
   {
+    name: "saavn-me",
+    url: (q) => `https://saavn.me/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
+    parse: (raw) => raw?.data?.results ?? null,
+  },
+  {
     name: "rajput-hemant",
     url: (q) => `https://jiosaavn-api-ts.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
