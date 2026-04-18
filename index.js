@@ -17,6 +17,11 @@ const MIRRORS = [
     parse: (raw) => raw?.data?.results ?? null,
   },
   {
+  name: "jiosaavn-self",
+  url: (q) => `https://jiosaavn-go-brr.mmanojkalita7.workers.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
+  parse: (raw) => raw?.data?.results ?? null,
+  },
+  {
     name: "saavn-dev",
     url: (q) => `https://saavn.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
