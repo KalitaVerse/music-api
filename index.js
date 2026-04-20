@@ -12,6 +12,11 @@ const CACHE = new Map();
 // ─────────────────────────────────────────────────────────────────────────────
 const MIRRORS = [
   {
+    name: "saavn-me",
+    url: (q) => `https://saavn.me/search/songs?query=${encodeURIComponent(q)}&limit=50`,
+    parse: (raw) => raw?.data?.results ?? [],
+  }
+  {
     name: "kalita-own",
     url: (q) => `https://jiosaavn-n0ivatwvc-kalitaverses-projects.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
