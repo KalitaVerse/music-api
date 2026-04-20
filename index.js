@@ -8,32 +8,28 @@ const PORT = process.env.PORT || 3000;
 const CACHE = new Map();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. MIRROR REGISTRY (Saavn + iTunes + Deezer)
+// 1. MIRROR REGISTRY (JioSaavn only — full songs)
+//    iTunes & Deezer removed: their public APIs only serve 30-sec previews.
 // ─────────────────────────────────────────────────────────────────────────────
 const MIRRORS = [
   {
     name: "saavn-me",
     url: (q) => `https://saavn.me/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-    parse: (raw) => raw?.data?.results ?? [],
-  }
+    parse: (raw) => raw?.data?.results ?? null, 
+  },                                             
   {
     name: "kalita-own",
     url: (q) => `https://jiosaavn-n0ivatwvc-kalitaverses-projects.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
   },
   {
-  name: "jiosaavn-self",
-  url: (q) => `https://jiosaavn-go-brr.mmanojkalita7.workers.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-  parse: (raw) => raw?.data?.results ?? null,
+    name: "jiosaavn-self",
+    url: (q) => `https://jiosaavn-go-brr.mmanojkalita7.workers.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
+    parse: (raw) => raw?.data?.results ?? null,
   },
   {
     name: "saavn-dev",
     url: (q) => `https://saavn.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-    parse: (raw) => raw?.data?.results ?? null,
-  },
-  {
-    name: "saavn-dev-2",
-    url: (q) => `https://saavn.dev/api/search/songs?query=${encodeURIComponent(q)}&page=1&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
   },
   {
@@ -46,6 +42,7 @@ const MIRRORS = [
     url: (q) => `https://jiosaavn-api-beta.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
   },
+  // ── Metadata-only fallbacks (30-sec previews) ──────────────────────────────
   {
     name: "itunes",
     url: (q) => `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=20`,
@@ -87,20 +84,24 @@ const MIRRORS = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. SEARCH LOGIC (Race + Timeout + Shuffle)
+// 2. SEARCH LOGIC (Race all mirrors — JioSaavn first, iTunes/Deezer as fallback)
 // ─────────────────────────────────────────────────────────────────────────────
 const buildActiveMirrors = () => {
-  const primary = MIRRORS[0];
-  const critical = MIRRORS.filter((m) => m.name === "itunes" || m.name === "deezer");
-  const others = MIRRORS.filter((m) => !["itunes", "deezer", primary.name].includes(m.name))
-                        .sort(() => Math.random() - 0.5);
-  return [primary, ...others.slice(0, 2), ...critical];
+  // JioSaavn mirrors race first (full songs).
+  // iTunes & Deezer are appended at the end — only used if ALL JioSaavn mirrors fail.
+  const saavn = MIRRORS.filter((m) => m.name !== "itunes" && m.name !== "deezer")
+                       .sort(() => Math.random() - 0.5);
+  const fallback = MIRRORS.filter((m) => m.name === "itunes" || m.name === "deezer");
+  return [...saavn, ...fallback];
 };
 
 const fetchWithTimeout = (mirror, q, ms = 4000) => {
   return new Promise((resolve, reject) => {
     const controller = new AbortController();
-    const timer = setTimeout(() => { controller.abort(); reject(new Error(`Timeout: ${mirror.name}`)); }, ms);
+    const timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Timeout: ${mirror.name}`));
+    }, ms);
 
     fetch(mirror.url(q), { signal: controller.signal })
       .then(async (res) => {
@@ -110,7 +111,10 @@ const fetchWithTimeout = (mirror, q, ms = 4000) => {
         if (parsed?.length > 0) resolve(parsed);
         else reject(new Error(`Empty: ${mirror.name}`));
       })
-      .catch((err) => { clearTimeout(timer); reject(err); });
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
   });
 };
 
@@ -118,21 +122,30 @@ app.get("/search", async (req, res) => {
   const q = req.query.q;
   if (!q) return res.status(400).json({ error: "Missing query" });
 
+  if (CACHE.has(q)) return res.json({ data: CACHE.get(q) });
+
   try {
-    const results = await Promise.any(buildActiveMirrors().map((m) => fetchWithTimeout(m, q)));
+    const results = await Promise.any(
+      buildActiveMirrors().map((m) => fetchWithTimeout(m, q))
+    );
+
     const seen = new Set();
     const unique = [];
 
     for (const s of results) {
       const artist = s.artists?.primary?.[0]?.name ?? "";
       const key = `${s.name}-${artist}`.toLowerCase();
-      if (!seen.has(key)) { seen.add(key); unique.push(s); }
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(s);
+      }
     }
-    const final = unique.slice(0, 50); 
+
+    const final = unique.slice(0, 50);
     CACHE.set(q, final);
-    return res.json({ data: unique.slice(0, 50) });
+    return res.json({ data: final });
   } catch (err) {
-    return res.status(502).json({ error: "Search failed. Try again." });
+    return res.status(502).json({ error: "All music sources unavailable. Try again." });
   }
 });
 
@@ -146,31 +159,44 @@ const rooms = new Map(); // Map<roomCode, { members: Set, state: Object }>
 wss.on("connection", (ws) => {
   let joinedRoom = null;
   ws.isAlive = true;
-  ws.on("pong", () => ws.isAlive = true);
+  ws.on("pong", () => (ws.isAlive = true));
 
   ws.on("message", (raw) => {
-    const data = JSON.parse(raw.toString());
-    if (data.type === "ping") return; // Keep-alive heartbeat
+    let data;
+    try {
+      data = JSON.parse(raw.toString());
+    } catch {
+      return; // Ignore malformed messages
+    }
+
+    if (data.type === "ping") return;
 
     const { type, room } = data;
 
     switch (type) {
       case "join":
-        if (joinedRoom) { /* cleanup logic */ }
+        if (joinedRoom && rooms.has(joinedRoom)) {
+          const prev = rooms.get(joinedRoom);
+          prev.members.delete(ws);
+          if (prev.members.size === 0) rooms.delete(joinedRoom);
+        }
+
         if (!rooms.has(room)) rooms.set(room, { members: new Set(), state: null });
-        
+
         const roomData = rooms.get(room);
         roomData.members.add(ws);
         joinedRoom = room;
 
-        // Catch-up: Send existing song/state to the new member immediately
+        // Catch-up: send existing song/state to the new member
         if (roomData.state) {
           ws.send(JSON.stringify({ ...roomData.state, serverTime: Date.now() }));
         }
-        
-        // Broadcast new member count
+
+        // Broadcast updated member count
         const msg = JSON.stringify({ type: "joined", room, members: roomData.members.size });
-        roomData.members.forEach(client => { if(client.readyState === WebSocket.OPEN) client.send(msg); });
+        roomData.members.forEach((client) => {
+          if (client.readyState === WebSocket.OPEN) client.send(msg);
+        });
         break;
 
       case "play":
@@ -179,9 +205,11 @@ wss.on("connection", (ws) => {
       case "seek":
         if (joinedRoom && rooms.has(joinedRoom)) {
           const r = rooms.get(joinedRoom);
-          r.state = data; // Save state for new joiners
+          r.state = data;
           const stamped = JSON.stringify({ ...data, serverTime: Date.now() });
-          r.members.forEach(c => { if(c !== ws && c.readyState === WebSocket.OPEN) c.send(stamped); });
+          r.members.forEach((c) => {
+            if (c !== ws && c.readyState === WebSocket.OPEN) c.send(stamped);
+          });
         }
         break;
     }
