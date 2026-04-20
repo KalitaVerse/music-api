@@ -15,8 +15,8 @@ const MIRRORS = [
   {
     name: "saavn-me",
     url: (q) => `https://saavn.me/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-    parse: (raw) => raw?.data?.results ?? null, // FIX: was `?? []` which never triggered fallback
-  },                                             // FIX: missing comma was here — caused SyntaxError
+    parse: (raw) => raw?.data?.results ?? null, 
+  },                                             
   {
     name: "kalita-own",
     url: (q) => `https://jiosaavn-n0ivatwvc-kalitaverses-projects.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
@@ -43,8 +43,6 @@ const MIRRORS = [
     parse: (raw) => raw?.data?.results ?? null,
   },
   // ── Metadata-only fallbacks (30-sec previews) ──────────────────────────────
-  // Appended last in buildActiveMirrors — only win the race if ALL JioSaavn mirrors fail.
-  // Good for artwork, album name, and duration when Saavn is down.
   {
     name: "itunes",
     url: (q) => `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=20`,
