@@ -13,7 +13,7 @@ const CACHE = new Map();
 //    Fallback : iTunes & Deezer   → metadata only (cover, artist, album)
 //                                   downloadUrl is intentionally [] so the
 //                                   Flutter client shows the card but never
-//                                   plays a 30-sec previews.
+//                                   plays a 30-sec preview.
 // ─────────────────────────────────────────────────────────────────────────────
 const MIRRORS = [
   // ── Primary: full stream URLs ─────────────────────────────────────────────
