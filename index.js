@@ -29,6 +29,40 @@ const MIRRORS = [
       `https://jiosaavn-go-brr.mmanojkalita7.workers.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
   },
+  {
+    // rajput-hemant's API — uses different field names so we normalize them
+    // to match what the Flutter app expects:
+    //   image[].link      → image[].url
+    //   artist_map.artists → artists.primary
+    //   download_url[].link → downloadUrl[].url
+    name: "heyjiosaanv",
+    url: (q) =>
+      `https://heyjiosaanv.vercel.app/search/songs?q=${encodeURIComponent(q)}&limit=50`,
+    parse: (raw) => {
+      const results = raw?.data?.results;
+      if (!Array.isArray(results) || results.length === 0) return null;
+      return results.map((s) => ({
+        id: s.id,
+        name: s.name,
+        duration: s.duration?.toString(),
+        artists: {
+          primary: (s.artist_map?.artists ?? []).map((a) => ({
+            name: a.name,
+          })),
+        },
+        image: (s.image ?? []).map((img) => ({
+          quality: img.quality,
+          url: img.link ?? img.url, // this API uses "link" not "url"
+        })),
+        // Handles both possible field names: download_url (new) or downloadUrl (old)
+        // Each entry uses "link" instead of "url" — normalize both
+        downloadUrl: (s.download_url ?? s.downloadUrl ?? []).map((u) => ({
+          quality: u.quality,
+          url: u.link ?? u.url,
+        })),
+      }));
+    },
+  },
 
   // ── Metadata-only fallbacks ───────────────────────────────────────────────
   // downloadUrl is always [] — Flutter shows the song card (name, artist,
@@ -213,8 +247,8 @@ wss.on("connection", (ws) => {
       case "resume":
       case "seek":
         if (joinedRoom && rooms.has(joinedRoom)) {
-          const r      = rooms.get(joinedRoom);
-          r.state      = data;
+          const r       = rooms.get(joinedRoom);
+          r.state       = data;
           const stamped = JSON.stringify({ ...data, serverTime: Date.now() });
           r.members.forEach((c) => {
             if (c !== ws && c.readyState === WebSocket.OPEN) c.send(stamped);
