@@ -8,44 +8,36 @@ const PORT = process.env.PORT || 3000;
 const CACHE = new Map();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. MIRROR REGISTRY (JioSaavn only — full songs)
-//    iTunes & Deezer removed: their public APIs only serve 30-sec previews.
+// 1. MIRROR REGISTRY
+//    Primary  : JioSaavn mirrors  → full stream URLs, 40-50 results
+//    Fallback : iTunes & Deezer   → metadata only (cover, artist, album)
+//                                   downloadUrl is intentionally [] so the
+//                                   Flutter client shows the card but never
+//                                   plays a 30-sec preview.
 // ─────────────────────────────────────────────────────────────────────────────
 const MIRRORS = [
-  {
-    name: "saavn-me",
-    url: (q) => `https://saavn.me/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-    parse: (raw) => raw?.data?.results ?? null, 
-  },                                             
+  // ── Primary: full stream URLs ─────────────────────────────────────────────
   {
     name: "kalita-own",
-    url: (q) => `https://jiosaavn-n0ivatwvc-kalitaverses-projects.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
+    url: (q) =>
+      `https://jiosaavn-n0ivatwvc-kalitaverses-projects.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
   },
   {
     name: "jiosaavn-self",
-    url: (q) => `https://jiosaavn-go-brr.mmanojkalita7.workers.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
+    url: (q) =>
+      `https://jiosaavn-go-brr.mmanojkalita7.workers.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
     parse: (raw) => raw?.data?.results ?? null,
   },
-  {
-    name: "saavn-dev",
-    url: (q) => `https://saavn.dev/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-    parse: (raw) => raw?.data?.results ?? null,
-  },
-  {
-    name: "rajput-hemant",
-    url: (q) => `https://jiosaavn-api-ts.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-    parse: (raw) => raw?.data?.results ?? null,
-  },
-  {
-    name: "jiosaavn-beta",
-    url: (q) => `https://jiosaavn-api-beta.vercel.app/api/search/songs?query=${encodeURIComponent(q)}&limit=50`,
-    parse: (raw) => raw?.data?.results ?? null,
-  },
-  // ── Metadata-only fallbacks (30-sec previews) ──────────────────────────────
+
+  // ── Metadata-only fallbacks ───────────────────────────────────────────────
+  // downloadUrl is always [] — Flutter shows the song card (name, artist,
+  // album, cover art) but _playSong will throw "No download URLs" and show
+  // "Cannot play this song." — no 30-sec preview ever plays.
   {
     name: "itunes",
-    url: (q) => `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=20`,
+    url: (q) =>
+      `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=20`,
     parse: (raw) => {
       if (!Array.isArray(raw?.results)) return null;
       return raw.results.map((s) => ({
@@ -54,17 +46,21 @@ const MIRRORS = [
         artists: { primary: [{ name: s.artistName }] },
         image: [
           { quality: "100x100", url: s.artworkUrl100 },
-          { quality: "600x600", url: s.artworkUrl100?.replace("100x100", "600x600") },
+          {
+            quality: "600x600",
+            url: s.artworkUrl100?.replace("100x100", "600x600"),
+          },
         ],
-        downloadUrl: s.previewUrl ? [{ quality: "preview", url: s.previewUrl }] : [],
+        downloadUrl: [], // intentionally empty — no preview playback
         duration: Math.floor((s.trackTimeMillis ?? 0) / 1000).toString(),
-        album: s.collectionName,
+        album: { name: s.collectionName },
       }));
     },
   },
   {
     name: "deezer",
-    url: (q) => `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=20`,
+    url: (q) =>
+      `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=20`,
     parse: (raw) => {
       if (!Array.isArray(raw?.data)) return null;
       return raw.data.map((s) => ({
@@ -72,26 +68,32 @@ const MIRRORS = [
         name: s.title,
         artists: { primary: [{ name: s.artist?.name }] },
         image: [
-          { quality: "small", url: s.album?.cover_small },
-          { quality: "big", url: s.album?.cover_big },
+          { quality: "small",  url: s.album?.cover_small  },
+          { quality: "medium", url: s.album?.cover_medium },
+          { quality: "big",    url: s.album?.cover_big    },
         ],
-        downloadUrl: s.preview ? [{ quality: "preview", url: s.preview }] : [],
+        downloadUrl: [], // intentionally empty — no preview playback
         duration: s.duration?.toString(),
-        album: s.album?.title,
+        album: { name: s.album?.title },
       }));
     },
   },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. SEARCH LOGIC (Race all mirrors — JioSaavn first, iTunes/Deezer as fallback)
+// 2. SEARCH LOGIC
+//    JioSaavn mirrors race first (full songs).
+//    iTunes & Deezer are appended last — used only if all JioSaavn mirrors fail.
 // ─────────────────────────────────────────────────────────────────────────────
 const buildActiveMirrors = () => {
-  // JioSaavn mirrors race first (full songs).
-  // iTunes & Deezer are appended at the end — only used if ALL JioSaavn mirrors fail.
-  const saavn = MIRRORS.filter((m) => m.name !== "itunes" && m.name !== "deezer")
-                       .sort(() => Math.random() - 0.5);
-  const fallback = MIRRORS.filter((m) => m.name === "itunes" || m.name === "deezer");
+  const saavn = MIRRORS.filter(
+    (m) => m.name !== "itunes" && m.name !== "deezer"
+  ).sort(() => Math.random() - 0.5);
+
+  const fallback = MIRRORS.filter(
+    (m) => m.name === "itunes" || m.name === "deezer"
+  );
+
   return [...saavn, ...fallback];
 };
 
@@ -129,12 +131,12 @@ app.get("/search", async (req, res) => {
       buildActiveMirrors().map((m) => fetchWithTimeout(m, q))
     );
 
-    const seen = new Set();
+    const seen   = new Set();
     const unique = [];
 
     for (const s of results) {
       const artist = s.artists?.primary?.[0]?.name ?? "";
-      const key = `${s.name}-${artist}`.toLowerCase();
+      const key    = `${s.name}-${artist}`.toLowerCase();
       if (!seen.has(key)) {
         seen.add(key);
         unique.push(s);
@@ -145,7 +147,9 @@ app.get("/search", async (req, res) => {
     CACHE.set(q, final);
     return res.json({ data: final });
   } catch (err) {
-    return res.status(502).json({ error: "All music sources unavailable. Try again." });
+    return res
+      .status(502)
+      .json({ error: "All music sources unavailable. Try again." });
   }
 });
 
@@ -153,8 +157,8 @@ app.get("/search", async (req, res) => {
 // 3. WEBSOCKET SYNC LOGIC (With Room State Memory)
 // ─────────────────────────────────────────────────────────────────────────────
 const server = app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
-const wss = new WebSocketServer({ server });
-const rooms = new Map(); // Map<roomCode, { members: Set, state: Object }>
+const wss    = new WebSocketServer({ server });
+const rooms  = new Map(); // Map<roomCode, { members: Set, state: Object }>
 
 wss.on("connection", (ws) => {
   let joinedRoom = null;
@@ -181,7 +185,8 @@ wss.on("connection", (ws) => {
           if (prev.members.size === 0) rooms.delete(joinedRoom);
         }
 
-        if (!rooms.has(room)) rooms.set(room, { members: new Set(), state: null });
+        if (!rooms.has(room))
+          rooms.set(room, { members: new Set(), state: null });
 
         const roomData = rooms.get(room);
         roomData.members.add(ws);
@@ -193,7 +198,11 @@ wss.on("connection", (ws) => {
         }
 
         // Broadcast updated member count
-        const msg = JSON.stringify({ type: "joined", room, members: roomData.members.size });
+        const msg = JSON.stringify({
+          type: "joined",
+          room,
+          members: roomData.members.size,
+        });
         roomData.members.forEach((client) => {
           if (client.readyState === WebSocket.OPEN) client.send(msg);
         });
@@ -204,8 +213,8 @@ wss.on("connection", (ws) => {
       case "resume":
       case "seek":
         if (joinedRoom && rooms.has(joinedRoom)) {
-          const r = rooms.get(joinedRoom);
-          r.state = data;
+          const r      = rooms.get(joinedRoom);
+          r.state      = data;
           const stamped = JSON.stringify({ ...data, serverTime: Date.now() });
           r.members.forEach((c) => {
             if (c !== ws && c.readyState === WebSocket.OPEN) c.send(stamped);
